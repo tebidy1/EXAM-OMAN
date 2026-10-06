@@ -2645,6 +2645,16 @@ function cardShell(inner) {
   window.scrollTo(0, 0);
 }
 
+// WhatsApp needs a country code. Mirror the admin link logic so what we store is
+// message-ready: strip 00, and treat a bare 8-digit number as Oman (+968). Returns
+// a canonical "+digits" string (or '' when there is nothing usable).
+function canonPhone(raw) {
+  let d = String(raw || '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.length === 8) d = '968' + d;
+  return d ? '+' + d : '';
+}
+
 // onboarding (default for a new visitor) + login
 function renderAuth(mode = null, msg = null) {
   session = null;
@@ -2674,7 +2684,8 @@ function renderAuth(mode = null, msg = null) {
     </label>
     ${login ? '' : `
       <label class="auth-label">رقم الواتساب
-        <input id="au-phone" type="tel" dir="ltr" autocomplete="tel" placeholder="+968 9xxx xxxx">
+        <input id="au-phone" type="tel" inputmode="tel" dir="ltr" autocomplete="off" placeholder="+968 9xxx xxxx">
+        <span id="au-phone-hint" class="card-meta" dir="ltr" style="display:block;min-height:1.1em;margin-top:4px;text-align:left"></span>
       </label>`}
     <label class="auth-label">كلمة المرور
       <input id="au-pass" type="password" dir="ltr" autocomplete="${login ? 'current' : 'new'}-password" placeholder="6+ أحرف">
@@ -2693,6 +2704,17 @@ function renderAuth(mode = null, msg = null) {
     btn.textContent = login ? 'دخول' : 'ابدأ التجربة المجانية';
   };
   $('#au-switch').addEventListener('click', () => renderAuth(login ? 'signup' : 'login'));
+  // show the doctor the exact number we will save — a wrong autofill becomes visible
+  const phoneEl = $('#au-phone');
+  if (phoneEl) {
+    const hint = $('#au-phone-hint');
+    const showPhone = () => {
+      const c = canonPhone(phoneEl.value);
+      hint.textContent = c && c.replace(/\D/g, '').length >= 8 ? '📱 سنراسلك على واتساب: ' + c : '';
+    };
+    phoneEl.addEventListener('input', showPhone);
+    showPhone();
+  }
   // every refusal is counted by its reason: the gap between auth_try and
   // auth_ok is the doctors who wanted in and could not get in
   const refuse = (reason, text) => { Track.step('auth_fail', { mode, reason }); return fail(text); };
@@ -2709,7 +2731,7 @@ function renderAuth(mode = null, msg = null) {
         await SB.login(email, pass);
       } else {
         const name = $('#au-name').value.trim();
-        const phone = $('#au-phone').value.trim();
+        const phone = canonPhone($('#au-phone').value);   // store message-ready "+digits"
         if (!name) return refuse('no_name', 'أدخل اسمك');
         if (phone.replace(/\D/g, '').length < 8) return refuse('bad_phone', 'أدخل رقم واتساب صحيحاً');
         if (pass.length < 6) return refuse('short_password', 'كلمة المرور قصيرة — 6 أحرف على الأقل');
