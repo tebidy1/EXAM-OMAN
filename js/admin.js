@@ -209,14 +209,17 @@ const accessLabel = (u) => {
 };
 const statusChip = (u) => u.role === 'admin' ? '' : ` <span class="status-chip ${accessOf(u)}">${accessLabel(u)}</span>`;
 const planLabel = (r) => r.plan === 'part' ? `جزء من ${PARTS}` : 'اشتراك كامل';
-// wa.me needs a country code. If the doctor saved a bare local number (8 digits,
+// WhatsApp needs a country code. If the doctor saved a bare local number (8 digits,
 // the signup minimum) we assume Oman (+968); 00-prefixed numbers lose the 00.
-const waHref = (phone) => {
+// Uses api.whatsapp.com (not wa.me): the short domain is blocked by some DNS/ISPs
+// and resolves to DNS_PROBE_FINISHED_NXDOMAIN; the full domain is far more reliable.
+const waDigits = (phone) => {
   let d = String(phone || '').replace(/\D/g, '');
   if (d.startsWith('00')) d = d.slice(2);
   if (d.length === 8) d = '968' + d;
-  return 'https://wa.me/' + d;
+  return d;
 };
+const waHref = (phone) => 'https://api.whatsapp.com/send?phone=' + waDigits(phone);
 
 function renderDoctors() {
   if (drillId) return renderDrill();
@@ -1170,7 +1173,7 @@ function setMsgTpl(i) { msgText = MSG_TEMPLATES[i][1]; render(); }
 // the per-recipient WhatsApp link, message pre-filled with their name
 function msgLink(u) {
   const text = String(msgText).replace(/\{name\}/g, u.name || 'دكتور');
-  return waHref(u.phone) + '?text=' + encodeURIComponent(text);
+  return waHref(u.phone) + '&text=' + encodeURIComponent(text);
 }
 
 function msgListHtml() {
