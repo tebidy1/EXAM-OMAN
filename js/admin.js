@@ -30,6 +30,8 @@ const receiptUrls = new Map();     // receipt_path -> { url, type } once fetched
 let drillId = null;
 let anDrill = null;                // analytics: { kind, key } of the figure we drilled into
 let drillFrom = null;              // where a doctor card was opened from, so "back" returns there
+let msgSeg = 'trial_done';         // messaging: which segment of doctors is selected
+let msgText = '';                  // messaging: the editable template (lazily seeded)
 
 /* ---------------- boot ---------------- */
 (async function boot() {
@@ -127,6 +129,7 @@ function shell(inner) {
     ['overview', '📊', 'Overview'],
     ['requests', '🧾', 'Requests' + (waiting ? `<span class="tab-badge">${waiting}</span>` : '')],
     ['doctors', '👨‍⚕️', 'Doctors'],
+    ['messaging', '📣', 'Messaging'],
     ['analytics', '📈', 'Analytics'],
     ['codes', '🔑', 'Codes'],
     ['growth', '🎁', 'Growth'],
@@ -206,7 +209,14 @@ const accessLabel = (u) => {
 };
 const statusChip = (u) => u.role === 'admin' ? '' : ` <span class="status-chip ${accessOf(u)}">${accessLabel(u)}</span>`;
 const planLabel = (r) => r.plan === 'part' ? `جزء من ${PARTS}` : 'اشتراك كامل';
-const waHref = (phone) => 'https://wa.me/' + String(phone || '').replace(/\D/g, '');
+// wa.me needs a country code. If the doctor saved a bare local number (8 digits,
+// the signup minimum) we assume Oman (+968); 00-prefixed numbers lose the 00.
+const waHref = (phone) => {
+  let d = String(phone || '').replace(/\D/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  if (d.length === 8) d = '968' + d;
+  return 'https://wa.me/' + d;
+};
 
 function renderDoctors() {
   if (drillId) return renderDrill();
@@ -1127,9 +1137,94 @@ async function togglePromo(id, active) {
   } catch (e) { alert('تعذر التعديل: ' + e.message); }
 }
 
+/* ---------------- messaging: WhatsApp outreach, one tap at a time ----------------
+   WhatsApp forbids automated bulk sending, so this is not a broadcast: it builds
+   a ready list where each doctor's 💬 opens WhatsApp with the message already typed
+   (name filled in) — you press send, then move to the next. Segments + templates
+   below turn "look up every number and retype" into "tap, send, next". */
+const TRIAL_LIMIT = 25;   // mirrors app.js: a trial covers 25 unique questions (+ any bonus)
+
+// each: [id, label, predicate over a doctor row]
+const MSG_SEGMENTS = [
+  ['trial_done', 'أكملوا التجريبي ولم يدفعوا', (u) => accessOf(u) !== 'active' && (u.covered || 0) >= TRIAL_LIMIT + (u.bonus_questions || 0)],
+  ['trial', 'على التجريبي (لم يدفعوا)', (u) => accessOf(u) !== 'active'],
+  ['paid', 'مشتركون مدفوعون', (u) => accessOf(u) === 'active'],
+  ['active7', 'نشطون آخر ٧ أيام', (u) => Date.now() - new Date(u.last_seen).getTime() < 7 * 864e5],
+  ['all', 'كل الأطباء', () => true],
+];
+
+// {name} is replaced with the doctor's name per recipient
+const MSG_TEMPLATES = [
+  ['تشجيع على الدفع', 'مرحباً {name} 👋\nلاحظنا أنك أكملت الأسئلة المجانية في منصة Oman EM Prep — نتمنى أنها نفعتك! الاشتراك الكامل يفتح لك بنك الأسئلة كاملاً مع المحاكاة والتقارير التفصيلية. هل تحب أن أساعدك في تفعيل اشتراكك؟'],
+  ['سؤال عن التجربة', 'مرحباً {name} 👋\nأنا من فريق Oman EM Prep. أتابع تقدّمك وأحببت أن أسألك مباشرةً: كيف كانت تجربتك مع المنصة حتى الآن؟ وهل من شيء تتمنى أن نضيفه أو نحسّنه؟ رأيك يهمّنا كثيراً 🙏'],
+  ['تذكير بالعودة', 'مرحباً {name} 👋\nاشتقنا لك في Oman EM Prep! أسئلة وتحديثات جديدة بانتظارك. جاهز نكمل التحضير معاً؟'],
+];
+
+const msgSegDef = () => MSG_SEGMENTS.find((s) => s[0] === msgSeg) || MSG_SEGMENTS[0];
+// doctors we can actually reach: a doctor row with a phone, matching the chosen segment
+const msgRecipients = () => usersCache.filter((u) => u.role === 'doctor' && u.phone && msgSegDef()[2](u));
+
+function setMsgSeg(id) { msgSeg = id; render(); }
+function setMsgTpl(i) { msgText = MSG_TEMPLATES[i][1]; render(); }
+
+// the per-recipient WhatsApp link, message pre-filled with their name
+function msgLink(u) {
+  const text = String(msgText).replace(/\{name\}/g, u.name || 'دكتور');
+  return waHref(u.phone) + '?text=' + encodeURIComponent(text);
+}
+
+function msgListHtml() {
+  const rows = msgRecipients();
+  if (!rows.length) return '<div class="card"><div class="card-meta">لا أطباء في هذه الشريحة (أو بلا رقم واتساب).</div></div>';
+  return rows.map((u) => `
+    <div class="hist-row">
+      <span class="hist-title">${esc(u.name || u.email)}${statusChip(u)}<br>
+        <span class="hist-meta" style="font-weight:400">${esc(u.phone)}</span></span>
+      <a class="btn btn-primary" target="_blank" rel="noopener" href="${esc(msgLink(u))}">💬 إرسال</a>
+    </div>`).join('');
+}
+
+function renderMessaging() {
+  if (msgText === '') msgText = MSG_TEMPLATES[0][1];   // seed once with the default template
+  const noPhone = usersCache.filter((u) => u.role === 'doctor' && !u.phone).length;
+  const count = msgRecipients().length;
+  const segPills = MSG_SEGMENTS.map(([id, label]) =>
+    `<button class="btn ${msgSeg === id ? 'btn-primary' : ''}" style="margin:0 6px 6px 0" onclick="setMsgSeg('${id}')">${label}</button>`).join('');
+  const tplPills = MSG_TEMPLATES.map(([label], i) =>
+    `<button class="btn" style="margin:0 6px 6px 0" onclick="setMsgTpl(${i})">${label}</button>`).join('');
+  return `
+    <div class="sec-hero">
+      <div class="card-icon big">📣</div>
+      <div>
+        <h1>مراسلة الأطباء</h1>
+        <div class="card-meta">واتساب لا يسمح بالإرسال الجماعي الآلي. هنا تختار شريحة ورسالة، ثم تضغط 💬 لكل طبيب فتفتح المحادثة <b>والرسالة مكتوبة مسبقاً</b> باسمه — تضغط إرسال ثم تنتقل للتالي.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="section-heading" style="margin:0 0 10px"><h2>١) اختر الشريحة</h2></div>
+      <div>${segPills}</div>
+      <div class="card-meta" style="margin-top:8px">${count} طبيب بأرقام واتساب في هذه الشريحة${noPhone ? ` · (${noPhone} بلا رقم — لا يمكن مراسلتهم)` : ''}</div>
+    </div>
+
+    <div class="card">
+      <div class="section-heading" style="margin:0 0 10px"><h2>٢) الرسالة</h2></div>
+      <div class="card-meta" style="margin-bottom:8px">نماذج جاهزة (قابلة للتعديل) — <code>{name}</code> يُستبدل باسم الطبيب:</div>
+      <div>${tplPills}</div>
+      <textarea id="msg-text" rows="5" dir="rtl"
+        style="width:100%;margin-top:10px;padding:11px 13px;border:1.5px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-family:inherit;line-height:1.7;resize:vertical">${esc(msgText)}</textarea>
+    </div>
+
+    <div class="card">
+      <div class="section-heading" style="margin:0 0 10px"><h2>٣) أرسِل — واحداً تلو الآخر</h2></div>
+      <div class="hist-list" id="msg-list">${msgListHtml()}</div>
+    </div>`;
+}
+
 /* ---------------- render root ---------------- */
 function render() {
   if (adminTab === 'doctors') app.innerHTML = shell(renderDoctors());
+  else if (adminTab === 'messaging') app.innerHTML = shell(renderMessaging());
   else if (adminTab === 'analytics') app.innerHTML = shell(renderAnalytics());
   else if (adminTab === 'codes') app.innerHTML = shell(renderCodes());
   else if (adminTab === 'growth') app.innerHTML = shell(renderGrowth());
@@ -1155,6 +1250,11 @@ function render() {
   $('#cd-gen')?.addEventListener('click', generateCodes);
   $('#rf-save')?.addEventListener('click', saveReferralSettings);
   $('#pr-gen')?.addEventListener('click', generatePromo);
+  const msg = $('#msg-text');
+  if (msg) {
+    // rebuild only the recipient links as you type, so the textarea keeps focus
+    msg.addEventListener('input', (e) => { msgText = e.target.value; const l = $('#msg-list'); if (l) l.innerHTML = msgListHtml(); });
+  }
 }
 
 function doctorsListHtml() {
